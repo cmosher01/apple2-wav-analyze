@@ -1,0 +1,41 @@
+plugins {
+    id 'application'
+    id 'org.beryx.runtime' version '1.13.1'
+    id 'com.coditory.manifest' version '0.2.6'
+}
+
+def versionMinor = '0.1'
+version = "${versionMinor}.0".toString()
+
+group = 'org.cmosher01.apple2'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of 17
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        url = uri('https://public:\u0067hp_fya6Kseu3XOBMg2icbg7f1LP6ZFYjj35v4Zj@maven.pkg.github.com/cmosher01/*')
+    }
+}
+
+dependencies {
+    implementation group: 'com.github.psambit9791', name: 'jdsp', version: 'latest.release'
+}
+
+application {
+    mainClass = 'org.cmosher01.apple2.Apple2WavAnalyze'
+}
+
+runtime {
+    jpackage {
+        appVersion = versionMinor
+    }
+}
+
+//assemble {
+//    dependsOn tasks.jpackage
+//}
