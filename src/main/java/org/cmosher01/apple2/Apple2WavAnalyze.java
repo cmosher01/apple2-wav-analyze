@@ -9,27 +9,32 @@ import java.nio.*;
 import java.util.*;
 
 public final class Apple2WavAnalyze {
-    public static void main(final String... args) throws UnsupportedAudioFileException, IOException {
 
+    public static void main(final String... args) throws UnsupportedAudioFileException, IOException {
         try (final var file = AudioSystem.getAudioInputStream(new File(args[0]))) {
             final var format = file.getFormat();
             showAudioFormat("original", format);
-            //102_048.0f
-            final var desired = new AudioFormat(
-                AudioFormat.Encoding.PCM_FLOAT,
-                format.getSampleRate(),
-                32,
-                1,
-                4,
-                format.getFrameRate(),
-                true);
+            final var desired = desiredFormat(format);
             showAudioFormat("desired", desired);
             try (final var in = AudioSystem.getAudioInputStream(desired, file)) {
                 final var actual = in.getFormat();
                 showAudioFormat("actual", actual);
-                analyze(in, actual);
+
+                var signal = readSignalFile(in);
+                analyze(signal, actual);
             }
         }
+    }
+
+    private static AudioFormat desiredFormat(final AudioFormat format) {
+        return new AudioFormat(
+            AudioFormat.Encoding.PCM_FLOAT,
+            format.getSampleRate(),
+            32,
+            1,
+            4,
+            format.getFrameRate(),
+            true);
     }
 
     private static void showAudioFormat(final String name, final AudioFormat format) {
@@ -38,61 +43,102 @@ public final class Apple2WavAnalyze {
 
     private static final int WIN = 11;
 
-    private static void analyze(final AudioInputStream in, final AudioFormat format) throws IOException {
-        stats();
-        final ArrayList<Double> r = new ArrayList<>(10_000_000);
+    private record PeakTrough (
+        double ts,
+        long w
+    ) {
+    }
 
-        final var rb = new byte[4];
-        while (0 <= in.read(rb)) {
-            r.add(to_float(rb));
-        }
-        System.out.printf("total samples read from file: %,d\n", r.size());
-        stats();
-        System.out.println();
-
-
-
-
-        double[] signal = r.stream().mapToDouble(d -> d).toArray();
-
+    private static void analyze(double[] signal, final AudioFormat format) {
         double rate = format.getSampleRate();
         signal = new Resample(400, 40, "constant").resampleSignal(signal);
         rate = rate*(400/40);
         signal = new Smooth(signal, WIN, "triangular").smoothSignal();
 
-
-
-
-        final var findPeaks = new FindPeak(signal);
-
-        final Peak outPeaks = findPeaks.detectPeaks();
-//        final int[] peaks = outPeaks.getPeaks();
-        final int[] peaks = outPeaks.filterByWidth(to_samples(200.0*0.75, rate), to_samples(650.0*1.25, rate));
-
-        final Peak outTroughs = findPeaks.detectTroughs();
-//        final int[] troughs = outTroughs.getPeaks();
-        final int[] troughs = outTroughs.filterByWidth(to_samples(200.0*0.75, rate), to_samples(650.0*1.25, rate));
-
-        final int[] pts = Arrays.copyOf(peaks, peaks.length + troughs.length);
-        System.arraycopy(troughs, 0, pts, peaks.length, troughs.length);
-        Arrays.sort(pts);
-
-
-
+        final var pts = findPeaksAndTroughs(signal, rate);
         System.out.printf("count of peaks and troughs: %,d\n", pts.length);
-//        for (int i = 1; i < peaks.length; ++i) {
-//            System.out.printf("%6d: %7.2f\n", peaks[i], to_micros(peaks[i]-peaks[i-1], format));
-//        }
-        int m = 0;
-        for (int i = 1; i < pts.length; ++i) {
-            final double us = to_micros(pts[i]-pts[i-1], rate);
-            final long rounded = Math.round(us);
-            final long discrete = discrete(rounded);
-            System.out.printf("%3d ", discrete);
-            if (++m % 64 == 0) {
+        System.out.println();
+
+        final var rPT = findDiscreteWidths(pts, rate);
+        for (int i = 0; i < rPT.size(); ++i) {
+            final var pt = rPT.get(i);
+            if (i % 64 == 0) {
+                System.out.printf("%10.6f: %010d: ", pt.ts, i);
+            }
+            System.out.printf("%3d ", pt.w);
+            if ((i+1) % 64 == 0) {
                 System.out.println();
             }
         }
+
+    }
+
+    private static ArrayList<PeakTrough> findDiscreteWidths(int[] pts, double rate) {
+        final var rPT = new ArrayList<PeakTrough>();
+
+        for (int i = 1; i < pts.length; ++i) {
+            final double us = to_micros(pts[i]- pts[i-1], rate);
+            final long rounded = Math.round(us);
+            final long discrete = discrete(rounded);
+
+            rPT.add(new PeakTrough(to_micros(pts[i], rate)/1e6, discrete));
+        }
+        return rPT;
+    }
+
+    private static double[] readSignalFile(final AudioInputStream in) throws IOException {
+        stats();
+
+        final var rd = new ArrayList<Double>(10_000_000);
+
+        final var rb = new byte[4];
+        while (0 <= in.read(rb)) {
+            rd.add(to_float(rb));
+        }
+
+        System.out.printf("total samples read from file: %,d\n", rd.size());
+        stats();
+        System.out.println();
+
+        return rd.stream().mapToDouble(d -> d).toArray();
+    }
+
+    public static final double MIN_WIDTH = 200.0 * 0.75;
+    public static final double MAX_WIDTH = 650.0*1.25;
+
+    private static int[] findPeaksAndTroughs(final double[] signal, final double rate) {
+        final var findPeaks = new FindPeak(signal);
+
+        final var peaks = findPeaks.detectPeaks().filterByWidth(to_samples(MIN_WIDTH, rate), to_samples(MAX_WIDTH, rate));
+        final var troughs = findPeaks.detectTroughs().filterByWidth(to_samples(MIN_WIDTH, rate), to_samples(MAX_WIDTH, rate));
+
+        return merge(peaks, troughs);
+    }
+
+    private static int[] merge(final int[] ra, final int[] rb) {
+        final int[] rc = new int[ra.length + rb.length];
+
+        int ia = 0;
+        int ib = 0;
+        int ic = 0;
+
+        while (ia < ra.length && ib < rb.length) {
+            if (ra[ia] < rb[ib]) {
+                rc[ic++] = ra[ia++];
+            } else {
+                rc[ic++] = rb[ib++];
+            }
+        }
+
+        while (ia < ra.length) {
+            rc[ic++] = ra[ia++];
+        }
+
+        while (ib < rb.length) {
+            rc[ic++] = rb[ib++];
+        }
+
+        return rc;
     }
 
     private static final double M = 1_000_000;
@@ -115,124 +161,15 @@ public final class Apple2WavAnalyze {
         System.out.println("-----------------------");
     }
 
-    private static void analyzeOld(final AudioInputStream in) throws IOException {
-        final var rb = new byte[102048];
-        final var cb = in.read(rb);
-        System.out.printf("read byte count: %d\n", cb);
-        final var rf = ByteBuffer.wrap(rb).order(ByteOrder.BIG_ENDIAN).asFloatBuffer();
-
-
-
-
-        final var rZeroes = new ArrayList<Integer>(1024*8);
-
-        final double M = 1.0e5d/102048.0d;
-        double t = 0.0;
-        long is = 0;
-        float fPrev = rf.get();
-//            System.out.printf("%09d: %18.8f\n", is, fCurr);
-        while (rf.hasRemaining()) {
-            ++is;
-            float fCurr = rf.get();
-//            System.out.printf("%09d: %18.8f\n", is, fCurr);
-            if (Math.signum(fCurr) == 0) {
-                final double p = t;
-                t = M*is;
-                rZeroes.add(filter(t-p));
-            } else if (Math.signum(fCurr) != Math.signum(fPrev)) {
-                final double p = t;
-                t = zero(M*(is-1), fPrev, M*is, fCurr);
-                rZeroes.add(filter(t-p));
-            }
-            fPrev = fCurr;
-        }
-
-//        if (false) {
-        if (true) {
-            int cc = 0;
-            for (int i = 0; i < rZeroes.size(); ++i) {
-                System.out.printf("%d ", rZeroes.get(i));
-                if (++cc % 64 == 0) {
-                    System.out.println();
-                }
-            }
-            System.out.println();
-        }
-    }
-
-    private static boolean crosses_zero(final double f_prev, final double f) {
-        if (Math.signum(f_prev) == 0) {
-            return false;
-        }
-        if (Math.signum(f) == 0) {
-//            System.out.println("\n########################### ZERO\n");
-            return true;
-        }
-        return
-            Math.signum(f) != Math.signum(f_prev) ||
-            Math.signum(f) == 0;
-    }
-
-    private static void analyze2(final AudioInputStream in) throws IOException {
-        final double M = 1.0e5d/102048.0d;
-
-        final var rb = new byte[4];
-
-        int cc = 0;
-        double t = 0.0;
-        long is = 0;
-        double f_prev = 0.0f;
-        while (0 <= in.read(rb)) {
-            ++is;
-            final double f = to_float(rb);
-//            System.out.printf("%09d: %18.8f\n", is, f);
-
-//            if (crosses_zero(f_prev, f)) {
-//                final double p = t;
-//                t = zero(M * (is - 1), f_prev, M * is, f);
-//                final long w = filter(t - p);
-//                System.out.printf("%d ", w);
-//                if (w==0) {
-//                    System.out.printf("<@%d:%18.8f,%18.8f;%18.8f,%18.8f] ", is,M * (is - 1), f_prev, M * is, f);
-//                }
-//                if (++cc % 64 == 0) {
-//                    System.out.println();
-//                    System.out.printf("%d: ", is);
-//                }
-//            }
-
-            f_prev = f;
-        }
-
-        System.out.println();
-    }
-
     private static double to_float(final byte[] rb) {
         return ByteBuffer.wrap(rb).order(ByteOrder.BIG_ENDIAN).asFloatBuffer().get();
     }
 
-    private static double zero(final double t0, final double v0, final double t1, final double v1) {
-        final double m = (v1-v0)/(t1-t0);
-        final double b = v0-m*t0;
-        final double z = -(b/m);
-//        System.out.printf("%18.8f <== %18.8f,%18.8f;%18.8f,%18.8f     ", z, t0, v0, t1, v1);
-        return z;
-    }
-
-    private static int filter(final double x) {
-        return round(x); // for testing. all results should be close to the expected discrete values
-//        return discrete(round(x));
-    }
-
-    private static int round(final double x) {
-        final long d = Math.round(x);
-        return (int)d;
-    }
-
-    // 000 [135] 200 [225] 250 [375] 500 [575] 650 [700]
+    // d <135] 200 <225] 250 <375] 500 <575] 650 <700> d
+    // 0-134, 200, 250, 500, 650, 700-n
     private static long discrete(final long d) {
         if (d < 135L) {
-            return 0L;
+            return d;
         }
         if (d < 225L) {
             return 200L;
@@ -246,7 +183,6 @@ public final class Apple2WavAnalyze {
         if (d < 700L) {
             return 650L;
         }
-
-        return 1000L+d;
+        return d;
     }
 }
