@@ -20,7 +20,7 @@ public final class Apple2WavAnalyze {
                 final var actual = in.getFormat();
                 showAudioFormat("actual", actual);
 
-                var signal = readSignalFile(in);
+                final var signal = readSignalFile(in);
                 analyze(signal, actual);
             }
         }
@@ -38,10 +38,10 @@ public final class Apple2WavAnalyze {
     }
 
     private static void showAudioFormat(final String name, final AudioFormat format) {
-        System.out.printf("%10s audio format: frame-rate=%10.2f, sample-rate=%10.2f, %s\n", name, format.getFrameRate(), format.getSampleRate(), format);
+        System.out.printf("%10s audio format: frame-rate=%.1f, sample-rate=%.1f, %s\n", name, format.getFrameRate(), format.getSampleRate(), format);
     }
 
-    private static final int WIN = 11;
+    private static final int SMOOTHING_WINDOW = 11;
 
     private record PeakTrough (
         double ts,
@@ -52,8 +52,8 @@ public final class Apple2WavAnalyze {
     private static void analyze(double[] signal, final AudioFormat format) {
         double rate = format.getSampleRate();
         signal = new Resample(400, 40, "constant").resampleSignal(signal);
-        rate = rate*(400/40);
-        signal = new Smooth(signal, WIN, "triangular").smoothSignal();
+        rate *= 400/40;
+        signal = new Smooth(signal, SMOOTHING_WINDOW, "triangular").smoothSignal();
 
         final var pts = findPeaksAndTroughs(signal, rate);
         System.out.printf("count of peaks and troughs: %,d\n", pts.length);
@@ -78,10 +78,12 @@ public final class Apple2WavAnalyze {
 
         for (int i = 1; i < pts.length; ++i) {
             final double us = to_micros(pts[i]- pts[i-1], rate);
-            final long rounded = Math.round(us);
-            final long discrete = discrete(rounded);
+            long w = 0;
 
-            rPT.add(new PeakTrough(to_micros(pts[i], rate)/1e6, discrete));
+            w = Math.round(us);
+            w = discrete(w);
+
+            rPT.add(new PeakTrough(to_micros(pts[i], rate)/1e6, w));
         }
         return rPT;
     }
