@@ -11,6 +11,15 @@ import java.util.*;
 public final class Apple2WavAnalyze {
 
     public static void main(final String... args) throws UnsupportedAudioFileException, IOException {
+        if (0 < args.length && args[0].equals("bits")) {
+            int address = 0x801;
+            if (1 < args.length) {
+                address = Integer.parseInt(args[1], 16);
+            }
+            BitsToHex.convert(new BufferedReader(new FileReader(FileDescriptor.in)), address);
+            return;
+        }
+
         try (final var file = AudioSystem.getAudioInputStream(new File(args[0]))) {
             final var format = file.getFormat();
             showAudioFormat("original", format);
@@ -43,12 +52,6 @@ public final class Apple2WavAnalyze {
 
     private static final int SMOOTHING_WINDOW = 11;
 
-    private record PeakTrough (
-        double ts,
-        long w
-    ) {
-    }
-
     private static void analyze(double[] signal, final AudioFormat format) {
         double rate = format.getSampleRate();
         signal = new Resample(400, 40, "constant").resampleSignal(signal);
@@ -60,17 +63,144 @@ public final class Apple2WavAnalyze {
         System.out.println();
 
         final var rPT = findDiscreteWidths(pts, rate);
-        for (int i = 0; i < rPT.size(); ++i) {
-            final var pt = rPT.get(i);
-            if (i % 64 == 0) {
-                System.out.printf("%10.6f: %010d: ", pt.ts, i);
-            }
-            System.out.printf("%3d ", pt.w);
-            if ((i+1) % 64 == 0) {
-                System.out.println();
+
+        for (int lookahead = 0; lookahead <= 20; ++lookahead) {
+            rPT.add(new PeakTrough(-1));
+        }
+
+        final var out = new Printer(64, System.out);
+
+        if (false) {
+            for (int i = 0; i < rPT.size(); ++i) {
+                final var pt = rPT.get(i);
+                out.print(pt);
             }
         }
 
+        if (true) {
+            final int START = 0, HEADER = 1, SYNC = 2, DATA_a = 3, DATA_b = 4, END = 99;
+            int state = START;
+            int i = 0;
+            int cHeader = 0;
+            PeakTrough dataPrev = null;
+            while (state != END) {
+                switch (state) {
+                    case START: {
+                        if (rPT.get(i).w() == 650) {
+                            out.tag("HEADER", rPT.get(i));
+                            cHeader = 1;
+                            state = HEADER;
+                        } else {
+                            out.print(rPT.get(i));
+                        }
+                        ++i;
+                    }
+                    break;
+                    case HEADER: {
+                        if (rPT.get(i).w() == 650) {
+                            ++cHeader;
+//                            out.dot();
+                        } else {
+                            // TODO print length of header
+                            if (rPT.get(i).w() == 200) {
+                                state = SYNC;
+                            } else {
+                                out.print(rPT.get(i));
+                                state = START;
+                            }
+                        }
+                        ++i;
+                    }
+                    break;
+                    case SYNC: {
+                        if (rPT.get(i).w() == 250) {
+                            out.tag("SYNC", rPT.get(i));
+                            state = DATA_a;
+                        } else {
+                            out.print(rPT.get(i));
+                            state = START;
+                        }
+                        ++i;
+                    }
+                    break;
+                    case DATA_a: {
+                        if (rPT.get(i).w() == 250 || rPT.get(i).w() == 500) {
+                            dataPrev = rPT.get(i);
+                            state = DATA_b;
+                        } else {
+                            out.newLine();
+                            if (rPT.get(i).w() == 650) {
+                                state = START; //?
+                            } else {
+                                out.print(rPT.get(i));
+                            }
+                        }
+                        ++i;
+                    }
+                    break;
+                    case DATA_b: {
+                        if (rPT.get(i).w() == 250 || rPT.get(i).w() == 500) {
+                            if (rPT.get(i).w() == dataPrev.w()) {
+                                if (dataPrev.w() == 250) {
+                                    out.bit(0, dataPrev);
+                                } else {
+                                    out.bit(1, dataPrev);
+                                }
+                            } else {
+                                out.newLine();
+                                out.print(rPT.get(i-1));
+                                out.print(rPT.get(i));
+                                boolean drop = shouldDropBit(rPT, i);
+                                if (drop) {
+                                    out.print(rPT.get(++i));
+                                }
+                                //out.tag("E", rPT.get(i));
+                            }
+                            state = DATA_a;
+                        } else {
+                            out.newLine();
+                            out.print(rPT.get(i-1));
+                            out.print(rPT.get(i));
+                            boolean drop = shouldDropBit(rPT, i);
+                            if (drop) {
+                                out.print(rPT.get(++i));
+                            }
+                            //out.tag("E", rPT.get(i));
+                            state = DATA_a;
+                        }
+                        ++i;
+                    }
+                    break;
+                }
+                if (rPT.get(i).w() == -1) {
+                    state = END;
+                }
+            }
+        }
+    }
+
+    // good      mismatch
+    // 250 250   250 500   <X> <Y Y>
+    // 250 250   250 500   <X  X> <Y Y>
+    // 250 250   250 500   <X> <X X> <Y Y>
+    //                ^     ^
+    //                i    d0
+    // print and drop half-cycle at i
+    // if odd run of X's follows, print and drop one more half-cycle
+    private static boolean shouldDropBit(final ArrayList<PeakTrough> rPT, int i) {
+        long d0 = sget(rPT,++i);
+        int c = 1;
+        while (sget(rPT,++i) == d0) {
+            ++c;
+        }
+        return (c&1) != 0;
+    }
+
+    private static long sget(final ArrayList<PeakTrough> rPT, final int i) {
+        if (i < 0 || rPT.size() <= i) {
+            return 0L;
+        }
+        return rPT.get(i).w();
     }
 
     private static ArrayList<PeakTrough> findDiscreteWidths(int[] pts, double rate) {
