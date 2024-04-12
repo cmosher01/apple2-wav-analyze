@@ -64,20 +64,32 @@ public final class Apple2WavAnalyze {
 
         final var rPT = findDiscreteWidths(pts, rate);
 
+        if (true) {
+            final var histogram = new HashMap<Long,Integer>();
+            rPT.forEach(pt -> {
+                final var w = pt.w();
+                histogram.putIfAbsent(w, 0);
+                histogram.put(w, histogram.get(w)+1);
+            });
+//            histogram.forEach((k, v) -> System.out.printf("%7d: %10d\n", k, v));
+            histogram.keySet().stream().sorted().forEach(k ->
+                System.out.printf("%7d: %10d\n", k, histogram.get(k)));
+        }
+
         for (int lookahead = 0; lookahead <= 20; ++lookahead) {
             rPT.add(new PeakTrough(-1));
         }
 
         final var out = new Printer(64, System.out);
 
-        if (false) {
+        if (true) {
             for (int i = 0; i < rPT.size(); ++i) {
                 final var pt = rPT.get(i);
                 out.print(pt);
             }
         }
 
-        if (true) {
+        if (false) {
             final int START = 0, HEADER = 1, SYNC = 2, DATA_a = 3, DATA_b = 4, END = 99;
             int state = START;
             int i = 0;
@@ -211,8 +223,9 @@ public final class Apple2WavAnalyze {
             long w = 0;
 
             w = Math.round(us);
-            w = discrete(w);
-
+            if (false) {
+                w = discrete(w);
+            }
             rPT.add(new PeakTrough(to_micros(pts[i], rate)/1e6, w));
         }
         return rPT;
@@ -273,8 +286,8 @@ public final class Apple2WavAnalyze {
         return rc;
     }
 
-    private static final double M = 1_000_000;
-//    private static final double M = 1_020_484;
+//    private static final double M = 1_000_000;
+    private static final double M = 1_020_484;
 
     private static double to_micros(final int samples, final double rate) {
         return (double)samples * M / rate;
@@ -297,6 +310,7 @@ public final class Apple2WavAnalyze {
         return ByteBuffer.wrap(rb).order(ByteOrder.BIG_ENDIAN).asFloatBuffer().get();
     }
 
+    // TODO allow input of these breaks on the command line
     // d <135] 200 <225] 250 <375] 500 <575] 650 <700> d
     // 0-134, 200, 250, 500, 650, 700-n
     private static long discrete(final long d) {
